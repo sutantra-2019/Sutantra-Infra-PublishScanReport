@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates A Lambda Function
+
+Parameters:
+  pFunctionName:
+    Type: String
+    Default: "PGE-ECM-Publish-ScanReport"
+  pEnvironment:
+    Type: String
+    Default: "Dev"
+  pLambdaRoleARN:
+    Type: String
+    Default: "arn:aws:iam::138871512076:role/PGE-ECM-Access-For-Lambda"
+  pContact:
+    Type: String
+    Default: "auc8@pge.com"
+  pOwner:
+    Type: String
+    Default: "PGE ECM"
+  pAppName:
+    Type: String
+    Default: "CodeBuild"
+  pDeptName:
+    Type: String
+    Default: "ECM"
+    
+Resources:
+  rLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:     
+      Code:
+        ZipFile: !Sub |
+
+          import os.path
+          import os, boto3, email, time
+          from botocore.exceptions import ClientError
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+          from email.mime.application import MIMEApplication
+
+          def Publish_ScanReport(event, context):
+            time.sleep(5)
+            pSender=os.environ['AWS_Email_Sender']
+            pRecipent=os.environ['AWS_Email_Recipient']
+            pRegion=os.environ['AWS_Region']
+            pSubject=os.environ['AWS_Subject']
+            pExpiration = os.environ['AWS_PreSignURL_Expiry']
+            pS3BucketName = os.environ['AWS_ScanReport_Bucket']
+            #print(event)
+            #pS3Key=str(event["Records"][0]['s3']['object']['key']) 
+            pS3Key = "AWS-AssumeRole.txt"
+            pFileName=os.path.basename(pS3Key)
+            pBuildName = pFileName.split('.')[0]
+            pSeparator = "-" * 170
+            pTmpFileName='/tmp/' + pFileName
+            pAWSTmpFileName='/tmp/AWS-' + pFileName            
+            s3Obj=boto3.client("s3") 
+            s3Obj.download_file(pS3BucketName,pS3Key,pTmpFileName)
+            s3Obj.download_file(pS3BucketName,'AWS/'+ pS3Key,pAWSTmpFileName)            
+ 
+            Twistlock_Scan = s3Obj.generate_presigned_url('get_object', Params={'Bucket': pS3BucketName, 'Key': pS3Key}, ExpiresIn = pExpiration)
+            AWS_Scan = s3Obj.generate_presigned_url('get_object', Params={'Bucket': pS3BucketName, 'Key': 'AWS/'+ pS3Key}, ExpiresIn = pExpiration)
+            print("Presigned URL", Twistlock_Scan)
+            print("Presigned URL", AWS_Scan)
+ 
+            pBodyText = """<html>
+                           <head></head>
+                           <body>
+                             <h3> PGE ECM - Docker Image Scan Report From Code Build : """ + pBuildName + """</h3>
+                             <h4>""" + pSeparator + """</h4>
+                             <p>""" + """ Pre-Signed URL For Twistlock Scan Report: </p>
+                             <p>""" + Twistlock_Scan + """</p>
+                             <p>""" + """ Pre-Signed URL For AWS Scan Report: </p>
+                             <p>""" + AWS_Scan + """</p>
+                             <h4>""" + pSeparator + """</h4>
+                           </body>
+                        </html>"""
+
+            sesObj=boto3.client('ses',region_name=pRegion)  
+
+            # Add pSubject, from and to lines.
+            multipart_content_subtype = 'mixed'
+            msg = MIMEMultipart(multipart_content_subtype)
+            msg['To'] = "auc8@pge.com"
+            msg['From'] = pSender 
+            msg['Subject'] = pSubject
+ 
+            print(pBodyText)
+            textpart = MIMEText(pBodyText.encode('utf-8'),'html','UTF-8')
+            msg.attach(textpart)
+ 
+            readFileObj = MIMEApplication(open(pTmpFileName, 'rb').read())
+            readFileObj.add_header('Content-Disposition','attachment',filename=pTmpFileName)
+            msg.attach(readFileObj)
+            
+            readFileObj = MIMEApplication(open(pAWSTmpFileName, 'rb').read())
+            readFileObj.add_header('Content-Disposition','attachment',filename=pAWSTmpFileName)
+            msg.attach(readFileObj)
+            
+            pRecipent=[pRecipent]
+            
+            try:
+              response = sesObj.send_raw_email(RawMessage={'Data': msg.as_string()}, Source=msg['From'], Destinations=pRecipent)
+            except ClientError as e:
+              print(e.response['Error']['Message'])
+            else:
+              print("Email sent! Message ID:",response['MessageId'])        
+      Environment:
+        Variables: 
+          AWS_Region: 'us-west-2'
+          AWS_Subject: 'PGE ECM - Docker Image Scan Report'
+          AWS_Email_Sender: 'auc8@pge.com'
+          AWS_Email_Recipient: 'auc8@pge.com'
+          AWS_PreSignURL_Expiry: '3600'
+          AWS_ScanReport_Bucket: 'pge-ecm-twistlock-scanreport'  
+      FunctionName: !Ref pFunctionName          
+      Handler: index.Publish_ScanReport
+      MemorySize: 128
+      Role: !Ref pLambdaRoleARN
+      Runtime: python3.6
+      Tags: 
+        - Key: pge.technical.contact
+          Value: !Ref pContact
+          Key: pge.application.owner 
+          Value: !Ref pOwner
+          Key: pge.application.name 
+          Value: !Ref pAppName
+          Key: pge.department.name 
+          Value: !Ref pDeptName       
+      Timeout: '300'
